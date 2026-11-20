@@ -48,17 +48,22 @@ Execute na raiz do repositório:
 composer install
 test -f .env || cp .env.example .env
 DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail up -d --build
-if ! grep -q '^APP_KEY=' .env || grep -Eq "^APP_KEY=(\"\"|'')?$" .env; then
+if ! grep -q '^APP_KEY=' .env; then
+    printf '\nAPP_KEY=\n' >> .env
+fi
+if grep -Eq "^APP_KEY=(\"\"|'')?$" .env; then
+    sed -i -E "s/^APP_KEY=(\"\"|'')?$/APP_KEY=/" .env
     DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail artisan key:generate --no-interaction
 fi
 ```
 
-O `.env` existente é preservado. Gere uma chave somente se `APP_KEY` não
-existir ou estiver vazia (sem valor, `""` ou `''`); uma chave existente é
-mantida. Não compartilhe nem registre os valores privados desse arquivo. A
-inicialização não executa migrations nem instala dependências frontend. Não
-rode `sail:install` novamente: o `compose.yaml` já é versionado e essa
-instalação pode recriar a configuração e a imagem padrão compartilhada do Sail.
+O `.env` existente é preservado, exceto pela inclusão ou normalização de uma
+`APP_KEY` vazia antes de gerar a chave. O comando Artisan só roda quando a chave
+está ausente ou vazia (`APP_KEY=`, `APP_KEY=""` ou `APP_KEY=''`); valores
+existentes são mantidos. Não compartilhe nem registre valores privados desse
+arquivo. A inicialização não executa migrations nem instala dependências
+frontend. Não rode `sail:install` novamente: o `compose.yaml` já é versionado e
+essa instalação pode recriar a configuração e a imagem padrão compartilhada do Sail.
 
 As variáveis `APP_PORT` e `APP_URL` são independentes: altere ambas no `.env`
 para manter a porta HTTP e a URL consistentes (não há sincronização automática).
