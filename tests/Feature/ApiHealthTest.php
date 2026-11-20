@@ -15,7 +15,7 @@ class ApiHealthTest extends TestCase
         ]);
     }
 
-    public function test_unknown_api_route_returns_a_json_not_found_message(): void
+    public function test_unknown_api_route_returns_json_404_message(): void
     {
         $response = $this->get('/api/does-not-exist');
 
