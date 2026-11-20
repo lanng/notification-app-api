@@ -1,15 +1,22 @@
 {
     "$schema": "https://opencode.ai/config.json",
     "mcp": {
-        "laravel-boost": {
-            "type": "local",
-            "enabled": true,
-            "command": [
-                "wsl.exe",
-                "/usr/bin/php8.3",
-                "/home/victor/dev/tag-alert/artisan",
-                "boost:mcp"
-            ]
+        "servers": {
+            "laravel-boost": {
+                "type": "local",
+                "command": [
+                    "bash",
+                    "vendor/bin/sail",
+                    "artisan",
+                    "boost:mcp",
+                    "--no-interaction"
+                ],
+                "cwd": ".",
+                "environment": {
+                    "DOCKER_CONTEXT": "default",
+                    "COMPOSE_PROJECT_NAME": "tag-alert"
+                }
+            }
         }
     }
 }

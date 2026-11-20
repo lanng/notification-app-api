@@ -1,12 +1,17 @@
 {
     "mcpServers": {
         "laravel-boost": {
-            "command": "wsl.exe",
+            "command": "bash",
             "args": [
-                "/usr/bin/php8.3",
-                "/home/victor/dev/tag-alert/artisan",
-                "boost:mcp"
-            ]
+                "${CLAUDE_PROJECT_DIR:-.}/vendor/bin/sail",
+                "artisan",
+                "boost:mcp",
+                "--no-interaction"
+            ],
+            "env": {
+                "DOCKER_CONTEXT": "default",
+                "COMPOSE_PROJECT_NAME": "tag-alert"
+            }
         }
     }
 }
