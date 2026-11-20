@@ -35,8 +35,9 @@ o contexto global do Docker.
 O Compose contém somente a aplicação (`laravel.test`) e o PostgreSQL (`pgsql`).
 O HTTP é publicado apenas em `127.0.0.1:8088`; o PostgreSQL fica privado na rede
 Docker, acessível pela aplicação em `pgsql:5432`, sem porta publicada no host.
-A imagem da aplicação é `tag-alert-sail-8.3/app`; o banco de desenvolvimento
-usa PostgreSQL 18.7 (`postgres:18-alpine`). A versão principal do PostgreSQL
+A imagem da aplicação é `tag-alert-sail-8.3/app`; o PostgreSQL usa a tag
+flutuante `postgres:18-alpine`, que pode avançar dentro da major 18. A versão
+18.7 foi observada na verificação local, não está fixada. A major do PostgreSQL
 que será usada em um VPS ainda não foi definida nem comparada.
 
 ## Primeiro uso e inicialização
@@ -47,13 +48,14 @@ Execute na raiz do repositório:
 composer install
 test -f .env || cp .env.example .env
 DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail up -d --build
-if ! grep -q '^APP_KEY=.' .env; then
+if ! grep -q '^APP_KEY=' .env || grep -Eq "^APP_KEY=(\"\"|'')?$" .env; then
     DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail artisan key:generate --no-interaction
 fi
 ```
 
-O `.env` existente é preservado. Gere uma chave somente se `APP_KEY` estiver
-vazia; não compartilhe nem registre os valores privados desse arquivo. A
+O `.env` existente é preservado. Gere uma chave somente se `APP_KEY` não
+existir ou estiver vazia (sem valor, `""` ou `''`); uma chave existente é
+mantida. Não compartilhe nem registre os valores privados desse arquivo. A
 inicialização não executa migrations nem instala dependências frontend. Não
 rode `sail:install` novamente: o `compose.yaml` já é versionado e essa
 instalação pode recriar a configuração e a imagem padrão compartilhada do Sail.
