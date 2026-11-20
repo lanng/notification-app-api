@@ -1,58 +1,109 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Tag Alert
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Bootstrap enxuto de uma API Laravel 13 em PHP 8.3, executada localmente com
+Laravel Sail e PostgreSQL privado na rede Docker do projeto.
 
-## About Laravel
+## Escopo atual
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+Este repositório ainda não implementa funcionalidades de negócio. Não há
+frontend, dependências Node do projeto, Redis, Horizon, login, pareamento,
+autenticação, FCM, alertas, agendador, outbox ou implantação de produção.
+Embora a imagem oficial do Sail possa incluir ferramentas Node, elas não são
+dependências ou etapas de build da aplicação.
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+O endpoint `GET http://localhost:8088/api/health` responde
+`200 {"status":"ok"}`. É somente uma verificação de liveness; não testa a
+conexão com o banco e não é uma readiness check. O endpoint padrão `/up` do
+Laravel também continua disponível como liveness. A raiz `/` retorna 404 (não
+há página frontend), e rotas de API desconhecidas retornam 404 JSON.
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+Nenhuma migration foi executada neste bootstrap. Os arquivos padrão de usuário
+e migrations do Laravel continuam pendentes e não representam uma
+implementação de autenticação.
 
-## Learning Laravel
+## Requisitos locais
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+- PHP 8.3 e Composer no host para instalar dependências com `composer install`.
+  O host não precisa de `pdo_pgsql`; os comandos da aplicação rodam no Sail.
+- Docker disponível no contexto `default`.
 
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+O alvo de runtime planejado para um VPS é PHP 8.3; até aqui, essa versão foi
+verificada no Sail, não em um VPS. Os comandos abaixo selecionam o contexto
+`default` e o projeto `tag-alert` por execução, sem configurar alias ou alterar
+o contexto global do Docker.
 
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
+O Compose contém somente a aplicação (`laravel.test`) e o PostgreSQL (`pgsql`).
+O HTTP é publicado apenas em `127.0.0.1:8088`; o PostgreSQL fica privado na rede
+Docker, acessível pela aplicação em `pgsql:5432`, sem porta publicada no host.
+A imagem da aplicação é `tag-alert-sail-8.3/app`; o banco de desenvolvimento
+usa PostgreSQL 18.7 (`postgres:18-alpine`). A versão principal do PostgreSQL
+que será usada em um VPS ainda não foi definida nem comparada.
 
-## Agentic Development
+## Primeiro uso e inicialização
 
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
+Execute na raiz do repositório:
 
-```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+```sh
+composer install
+test -f .env || cp .env.example .env
+DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail up -d --build
+if ! grep -q '^APP_KEY=.' .env; then
+    DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail artisan key:generate --no-interaction
+fi
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+O `.env` existente é preservado. Gere uma chave somente se `APP_KEY` estiver
+vazia; não compartilhe nem registre os valores privados desse arquivo. A
+inicialização não executa migrations nem instala dependências frontend. Não
+rode `sail:install` novamente: o `compose.yaml` já é versionado e essa
+instalação pode recriar a configuração e a imagem padrão compartilhada do Sail.
 
-## Contributing
+As variáveis `APP_PORT` e `APP_URL` são independentes: altere ambas no `.env`
+para manter a porta HTTP e a URL consistentes (não há sincronização automática).
+Por exemplo, para usar a porta 8089, defina `APP_PORT=8089` e
+`APP_URL=http://localhost:8089` e recrie somente os serviços deste projeto:
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```sh
+DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail up -d --force-recreate
+```
 
-## Code of Conduct
+## Testes e verificações
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+O PHPUnit usa um banco PostgreSQL real chamado `testing`, separado do banco de
+desenvolvimento `tag_alert`. Os testes confirmam essa conexão. Execute:
 
-## Security Vulnerabilities
+```sh
+DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail artisan test --compact
+DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail composer validate --strict
+DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail composer audit
+vendor/bin/pint --dirty --format agent
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+Para salvar o relatório JUnit dos testes:
 
-## License
+```sh
+DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail artisan test --compact --log-junit storage/logs/task3-results.xml
+```
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+O `composer audit` deve ser avaliado pelo resultado atual do Composer; não
+ignore avisos para fazer a verificação parecer aprovada.
+
+## Laravel Boost para OpenCode
+
+Laravel Boost é uma dependência de desenvolvimento. A configuração V2 do
+OpenCode em `opencode.json` inicia, a partir da raiz do repositório,
+`bash vendor/bin/sail artisan boost:mcp --no-interaction` dentro do ambiente
+Sail, onde o driver PostgreSQL está disponível. O Docker local precisa estar
+ativo para usar essa integração. A conectividade do arquivo `.mcp.json` com
+Claude Code não foi verificada.
+
+## Parar os serviços
+
+Para parar somente os serviços deste projeto, preservando o volume local do
+PostgreSQL:
+
+```sh
+DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail stop
+```
+
+Não use `down -v` para a parada rotineira: isso remove o volume do banco.
