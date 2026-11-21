@@ -89,6 +89,7 @@ class RenderApiV1Exception
                 400 => self::jsonResponse(400, 'bad_request', 'Requisição inválida.'),
                 403 => self::accessDeniedResponse(),
                 404 => self::notFoundResponse(),
+                405 => self::methodNotAllowedResponse($exception),
                 415 => self::jsonResponse(
                     415,
                     'unsupported_media_type',
@@ -132,6 +133,28 @@ class RenderApiV1Exception
     private static function notFoundResponse(): JsonResponse
     {
         return self::jsonResponse(404, 'not_found', 'Recurso não encontrado.');
+    }
+
+    private static function methodNotAllowedResponse(HttpExceptionInterface $exception): JsonResponse
+    {
+        $allowedMethods = $exception->getHeaders()['Allow'] ?? null;
+        $safeMethods = is_string($allowedMethods)
+            ? array_values(array_filter(
+                array_map('trim', explode(',', $allowedMethods)),
+                static fn (string $method): bool => in_array(
+                    $method,
+                    ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT'],
+                    true,
+                ),
+            ))
+            : [];
+
+        return self::jsonResponse(
+            405,
+            'method_not_allowed',
+            'Método não permitido.',
+            headers: $safeMethods === [] ? [] : ['Allow' => implode(', ', $safeMethods)],
+        );
     }
 
     private static function internalErrorResponse(): JsonResponse
