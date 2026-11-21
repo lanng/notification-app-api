@@ -3,8 +3,10 @@
 use App\Http\Controllers\Api\V1\HostActivationController;
 use App\Http\Controllers\Api\V1\InstallationController;
 use App\Http\Controllers\Api\V1\InvitationController;
+use App\Http\Controllers\Api\V1\MonitorPairingRequestController;
 use App\Http\Controllers\Api\V1\OwnerMonitorController;
 use App\Http\Controllers\Api\V1\PairingRequestController;
+use App\Http\Controllers\Api\V1\SupportMembershipController;
 use App\Http\Middleware\ApplyAccessRateLimit;
 use App\Http\Middleware\RequireInstallation;
 use App\Http\Middleware\VerifyOwnerIdentity;
@@ -50,6 +52,26 @@ Route::post('/v1/monitors/{monitor}/invitations', [InvitationController::class, 
 Route::get('/v1/monitors/{monitor}/invitations', [InvitationController::class, 'index'])
     ->middleware(['auth:sanctum', RequireInstallation::class])
     ->name('api.v1.monitors.invitations.index');
+
+Route::get('/v1/monitors/{monitor}/supports', [SupportMembershipController::class, 'index'])
+    ->middleware(['auth:sanctum', RequireInstallation::class])
+    ->name('api.v1.monitors.supports.index');
+
+Route::get('/v1/monitors/{monitor}/pairing-requests', [MonitorPairingRequestController::class, 'index'])
+    ->middleware(['auth:sanctum', RequireInstallation::class])
+    ->name('api.v1.monitors.pairing-requests.index');
+
+Route::post('/v1/monitors/{monitor}/pairing-requests/{pairingRequest}/approval', [MonitorPairingRequestController::class, 'approve'])
+    ->middleware(['auth:sanctum', RequireInstallation::class, 'v1.json'])
+    ->name('api.v1.monitors.pairing-requests.approve');
+
+Route::post('/v1/monitors/{monitor}/pairing-requests/{pairingRequest}/rejection', [MonitorPairingRequestController::class, 'reject'])
+    ->middleware(['auth:sanctum', RequireInstallation::class, 'v1.json'])
+    ->name('api.v1.monitors.pairing-requests.reject');
+
+Route::delete('/v1/monitors/{monitor}/supports/{membership}', [SupportMembershipController::class, 'destroy'])
+    ->middleware(['auth:sanctum', RequireInstallation::class, 'v1.json'])
+    ->name('api.v1.monitors.supports.destroy');
 
 Route::delete('/v1/monitors/{monitor}/invitations/{invitation}', [InvitationController::class, 'destroy'])
     ->middleware(['auth:sanctum', RequireInstallation::class, 'v1.json'])

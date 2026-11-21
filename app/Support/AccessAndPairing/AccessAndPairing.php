@@ -11,6 +11,7 @@ use App\Models\MonitorMembership;
 use App\Models\PairingRequest;
 use App\Models\User;
 use App\Support\ApiV1\JsonTypes;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -228,6 +229,443 @@ class AccessAndPairing
                 'expiresAt' => $invitation->expires_at->getTimestamp() * 1000,
             ])
             ->all();
+    }
+
+    /**
+     * @return list<array{
+     *     membershipId: string,
+     *     installationId: string,
+     *     label: ?string,
+     *     role: 'Support',
+     *     status: 'Active',
+     *     approvedAt: int
+     * }>
+     */
+    public function listSupportMemberships(AccessContext $context, string $requestedMonitorId): array
+    {
+        $hostAccess = $this->preflightHostMonitor($context, $requestedMonitorId);
+        $memberships = MonitorMembership::query()
+            ->where('monitor_id', $hostAccess['monitorId'])
+            ->where('role', AccessRole::Support->value)
+            ->whereNotNull('approved_at')
+            ->whereNull('revoked_at')
+            ->with('installation:id,label')
+            ->orderBy('approved_at')
+            ->orderBy('id')
+            ->limit(3)
+            ->get(['id', 'installation_id', 'approved_at']);
+
+        return $memberships
+            ->map(fn (MonitorMembership $membership): array => [
+                'membershipId' => $membership->id,
+                'installationId' => $membership->installation_id,
+                'label' => $membership->installation?->label,
+                'role' => AccessRole::Support->value,
+                'status' => 'Active',
+                'approvedAt' => $membership->approved_at->getTimestamp() * 1000,
+            ])
+            ->all();
+    }
+
+    /**
+     * @return list<array{
+     *     id: string,
+     *     status: 'Pending',
+     *     installation: array{id: string, label: ?string},
+     *     createdAt: int,
+     *     requestExpiresAt: int
+     * }>
+     */
+    public function listPairingRequests(AccessContext $context, string $requestedMonitorId): array
+    {
+        $hostAccess = $this->preflightHostMonitor($context, $requestedMonitorId);
+        $pairingRequests = PairingRequest::query()
+            ->where('monitor_id', $hostAccess['monitorId'])
+            ->where('status', PairingRequestStatus::Pending->value)
+            ->where('request_expires_at', '>', now('UTC'))
+            ->whereHas('invitation', function (Builder $query) use ($hostAccess): void {
+                $query->where('issuing_generation', (int) $hostAccess['generation']);
+            })
+            ->with('installation:id,label')
+            ->orderBy('created_at')
+            ->orderBy('id')
+            ->limit(50)
+            ->get(['id', 'installation_id', 'status', 'created_at', 'request_expires_at']);
+
+        return $pairingRequests
+            ->map(fn (PairingRequest $pairingRequest): array => [
+                'id' => $pairingRequest->id,
+                'status' => PairingRequestStatus::Pending->value,
+                'installation' => [
+                    'id' => $pairingRequest->installation_id,
+                    'label' => $pairingRequest->installation?->label,
+                ],
+                'createdAt' => $pairingRequest->created_at->getTimestamp() * 1000,
+                'requestExpiresAt' => $pairingRequest->request_expires_at->getTimestamp() * 1000,
+            ])
+            ->all();
+    }
+
+    /**
+     * @return array{
+     *     requestId: string,
+     *     status: 'Approved',
+     *     membershipId: string,
+     *     role: 'Support',
+     *     decidedAt: int
+     * }
+     */
+    public function approvePairingRequest(
+        AccessContext $context,
+        string $requestedMonitorId,
+        string $pairingRequestId,
+    ): array {
+        $hostAccess = $this->preflightHostMonitor($context, $requestedMonitorId);
+
+        if (! Str::isUuid($pairingRequestId)) {
+            throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+        }
+
+        $result = DB::transaction(function () use ($context, $hostAccess, $pairingRequestId): array|AccessFailure {
+            $monitor = Monitor::query()
+                ->whereKey($hostAccess['monitorId'])
+                ->lockForUpdate()
+                ->first();
+
+            if (! $monitor instanceof Monitor) {
+                throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+            }
+
+            $this->assertCurrentActorToken($context);
+            $this->assertCurrentHostMembership($context, $monitor, $hostAccess['membershipId']);
+
+            $pairingRequest = PairingRequest::query()
+                ->whereKey($pairingRequestId)
+                ->where('monitor_id', $monitor->id)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $pairingRequest instanceof PairingRequest) {
+                throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+            }
+
+            if ($pairingRequest->status === PairingRequestStatus::Approved) {
+                $supportMembership = MonitorMembership::query()
+                    ->where('monitor_id', $monitor->id)
+                    ->where('installation_id', $pairingRequest->installation_id)
+                    ->where('role', AccessRole::Support->value)
+                    ->whereNotNull('approved_at')
+                    ->whereNull('revoked_at')
+                    ->lockForUpdate()
+                    ->first();
+
+                if (
+                    ! $supportMembership instanceof MonitorMembership
+                    || $pairingRequest->decided_at === null
+                ) {
+                    throw new AccessFailure(
+                        409,
+                        'pairing_request_terminal',
+                        'A solicitação de pareamento não pode mais ser alterada.',
+                    );
+                }
+
+                return [
+                    'requestId' => $pairingRequest->id,
+                    'status' => PairingRequestStatus::Approved->value,
+                    'membershipId' => $supportMembership->id,
+                    'role' => AccessRole::Support->value,
+                    'decidedAt' => $pairingRequest->decided_at->getTimestamp() * 1000,
+                ];
+            }
+
+            if (
+                $pairingRequest->status === PairingRequestStatus::Rejected
+                || $pairingRequest->status === PairingRequestStatus::Cancelled
+            ) {
+                throw new AccessFailure(
+                    409,
+                    'pairing_request_terminal',
+                    'A solicitação de pareamento não pode mais ser alterada.',
+                );
+            }
+
+            if ($pairingRequest->status === PairingRequestStatus::Expired) {
+                throw new AccessFailure(
+                    410,
+                    'pairing_request_unavailable',
+                    'A solicitação de pareamento não está mais disponível.',
+                );
+            }
+
+            $pendingToken = PersonalAccessToken::query()
+                ->where('tokenable_type', (new Installation)->getMorphClass())
+                ->where('tokenable_id', $pairingRequest->installation_id)
+                ->where('name', 'pairing-pending')
+                ->lockForUpdate()
+                ->first();
+            $decisionTime = now('UTC')->startOfSecond();
+
+            if (! $pairingRequest->request_expires_at->isAfter($decisionTime)) {
+                $pairingRequest->status = PairingRequestStatus::Expired;
+                $pairingRequest->decided_at = $decisionTime;
+                $pairingRequest->decision_actor_membership_id = null;
+                $pairingRequest->updated_at = $decisionTime;
+                $pairingRequest->save();
+
+                return new AccessFailure(
+                    410,
+                    'pairing_request_unavailable',
+                    'A solicitação de pareamento não está mais disponível.',
+                );
+            }
+
+            $currentInvitationExists = Invitation::query()
+                ->whereKey($pairingRequest->invitation_id)
+                ->where('monitor_id', $monitor->id)
+                ->where('issuing_generation', $monitor->host_generation)
+                ->exists();
+
+            if (! $currentInvitationExists) {
+                throw new AccessFailure(
+                    410,
+                    'pairing_request_unavailable',
+                    'A solicitação de pareamento não está mais disponível.',
+                );
+            }
+
+            $activeSupportCount = MonitorMembership::query()
+                ->where('monitor_id', $monitor->id)
+                ->where('role', AccessRole::Support->value)
+                ->whereNotNull('approved_at')
+                ->whereNull('revoked_at')
+                ->count();
+
+            if ($activeSupportCount >= 3) {
+                throw new AccessFailure(
+                    409,
+                    'support_limit_reached',
+                    'O limite de dispositivos de suporte foi atingido.',
+                );
+            }
+
+            if (
+                ! $pendingToken instanceof PersonalAccessToken
+                || $pendingToken->expires_at === null
+                || ! $pendingToken->expires_at->isAfter($decisionTime)
+            ) {
+                throw new AccessFailure(
+                    410,
+                    'pairing_request_unavailable',
+                    'A solicitação de pareamento não está mais disponível.',
+                );
+            }
+
+            $supportMembership = MonitorMembership::query()->create([
+                'monitor_id' => $monitor->id,
+                'installation_id' => $pairingRequest->installation_id,
+                'role' => AccessRole::Support,
+                'generation' => null,
+                'approved_at' => $decisionTime,
+            ]);
+            $supportMembership->created_at = $decisionTime;
+            $supportMembership->updated_at = $decisionTime;
+            $supportMembership->save();
+
+            $pairingRequest->status = PairingRequestStatus::Approved;
+            $pairingRequest->decided_at = $decisionTime;
+            $pairingRequest->decision_actor_membership_id = $hostAccess['membershipId'];
+            $pairingRequest->updated_at = $decisionTime;
+            $pairingRequest->save();
+
+            $pendingToken->expires_at = null;
+            $pendingToken->updated_at = $decisionTime;
+            $pendingToken->save();
+
+            return [
+                'requestId' => $pairingRequest->id,
+                'status' => PairingRequestStatus::Approved->value,
+                'membershipId' => $supportMembership->id,
+                'role' => AccessRole::Support->value,
+                'decidedAt' => $decisionTime->getTimestamp() * 1000,
+            ];
+        }, attempts: 1);
+
+        if ($result instanceof AccessFailure) {
+            throw $result;
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return array{requestId: string, status: 'Rejected', decidedAt: int}
+     */
+    public function rejectPairingRequest(
+        AccessContext $context,
+        string $requestedMonitorId,
+        string $pairingRequestId,
+    ): array {
+        $hostAccess = $this->preflightHostMonitor($context, $requestedMonitorId);
+
+        if (! Str::isUuid($pairingRequestId)) {
+            throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+        }
+
+        $result = DB::transaction(function () use ($context, $hostAccess, $pairingRequestId): array|AccessFailure {
+            $monitor = Monitor::query()
+                ->whereKey($hostAccess['monitorId'])
+                ->lockForUpdate()
+                ->first();
+
+            if (! $monitor instanceof Monitor) {
+                throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+            }
+
+            $this->assertCurrentActorToken($context);
+            $this->assertCurrentHostMembership($context, $monitor, $hostAccess['membershipId']);
+
+            $pairingRequest = PairingRequest::query()
+                ->whereKey($pairingRequestId)
+                ->where('monitor_id', $monitor->id)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $pairingRequest instanceof PairingRequest) {
+                throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+            }
+
+            if ($pairingRequest->status === PairingRequestStatus::Rejected) {
+                if ($pairingRequest->decided_at === null) {
+                    throw new AccessFailure(
+                        409,
+                        'pairing_request_terminal',
+                        'A solicitação de pareamento não pode mais ser alterada.',
+                    );
+                }
+
+                return [
+                    'requestId' => $pairingRequest->id,
+                    'status' => PairingRequestStatus::Rejected->value,
+                    'decidedAt' => $pairingRequest->decided_at->getTimestamp() * 1000,
+                ];
+            }
+
+            if (
+                $pairingRequest->status === PairingRequestStatus::Approved
+                || $pairingRequest->status === PairingRequestStatus::Cancelled
+            ) {
+                throw new AccessFailure(
+                    409,
+                    'pairing_request_terminal',
+                    'A solicitação de pareamento não pode mais ser alterada.',
+                );
+            }
+
+            if ($pairingRequest->status === PairingRequestStatus::Expired) {
+                throw new AccessFailure(
+                    410,
+                    'pairing_request_unavailable',
+                    'A solicitação de pareamento não está mais disponível.',
+                );
+            }
+
+            PersonalAccessToken::query()
+                ->where('tokenable_type', (new Installation)->getMorphClass())
+                ->where('tokenable_id', $pairingRequest->installation_id)
+                ->lockForUpdate()
+                ->get();
+            $decisionTime = now('UTC')->startOfSecond();
+
+            if (! $pairingRequest->request_expires_at->isAfter($decisionTime)) {
+                $pairingRequest->status = PairingRequestStatus::Expired;
+                $pairingRequest->decided_at = $decisionTime;
+                $pairingRequest->decision_actor_membership_id = null;
+                $pairingRequest->updated_at = $decisionTime;
+                $pairingRequest->save();
+
+                return new AccessFailure(
+                    410,
+                    'pairing_request_unavailable',
+                    'A solicitação de pareamento não está mais disponível.',
+                );
+            }
+
+            $pairingRequest->status = PairingRequestStatus::Rejected;
+            $pairingRequest->decided_at = $decisionTime;
+            $pairingRequest->decision_actor_membership_id = $hostAccess['membershipId'];
+            $pairingRequest->updated_at = $decisionTime;
+            $pairingRequest->save();
+
+            PersonalAccessToken::query()
+                ->where('tokenable_type', (new Installation)->getMorphClass())
+                ->where('tokenable_id', $pairingRequest->installation_id)
+                ->delete();
+
+            return [
+                'requestId' => $pairingRequest->id,
+                'status' => PairingRequestStatus::Rejected->value,
+                'decidedAt' => $decisionTime->getTimestamp() * 1000,
+            ];
+        }, attempts: 1);
+
+        if ($result instanceof AccessFailure) {
+            throw $result;
+        }
+
+        return $result;
+    }
+
+    public function revokeSupportMembership(
+        AccessContext $context,
+        string $requestedMonitorId,
+        string $membershipId,
+    ): void {
+        $hostAccess = $this->preflightHostMonitor($context, $requestedMonitorId);
+
+        if (! Str::isUuid($membershipId)) {
+            throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+        }
+
+        DB::transaction(function () use ($context, $hostAccess, $membershipId): void {
+            $monitor = Monitor::query()
+                ->whereKey($hostAccess['monitorId'])
+                ->lockForUpdate()
+                ->first();
+
+            if (! $monitor instanceof Monitor) {
+                throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+            }
+
+            $this->assertCurrentActorToken($context);
+            $this->assertCurrentHostMembership($context, $monitor, $hostAccess['membershipId']);
+
+            $membership = MonitorMembership::query()
+                ->whereKey($membershipId)
+                ->where('monitor_id', $monitor->id)
+                ->where('role', AccessRole::Support->value)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $membership instanceof MonitorMembership) {
+                throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+            }
+
+            if ($membership->revoked_at !== null) {
+                return;
+            }
+
+            $decisionTime = now('UTC')->startOfSecond();
+            $membership->revoked_at = $decisionTime;
+            $membership->updated_at = $decisionTime;
+            $membership->save();
+
+            $tokenQuery = PersonalAccessToken::query()
+                ->where('tokenable_type', (new Installation)->getMorphClass())
+                ->where('tokenable_id', $membership->installation_id);
+            $tokenQuery->lockForUpdate()->get();
+            $tokenQuery->delete();
+        }, attempts: 1);
     }
 
     public function cancelInvitation(
