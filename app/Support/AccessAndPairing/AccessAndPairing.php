@@ -76,6 +76,56 @@ class AccessAndPairing
 
     /**
      * @return array{
+     *     installationId: string,
+     *     monitorId: string,
+     *     membershipId: string,
+     *     role: 'Host'|'Support',
+     *     status: 'Active',
+     *     monitorGeneration: string
+     * }
+     */
+    public function discoverCurrentInstallationAccess(string $installationId): array
+    {
+        $memberships = MonitorMembership::query()
+            ->where('installation_id', $installationId)
+            ->whereNull('revoked_at')
+            ->whereNotNull('approved_at')
+            ->whereIn('role', [AccessRole::Host->value, AccessRole::Support->value])
+            ->with('monitor')
+            ->get()
+            ->filter(function (MonitorMembership $membership): bool {
+                if (! $membership->monitor instanceof Monitor) {
+                    return false;
+                }
+
+                return $membership->role !== AccessRole::Host
+                    || $membership->generation === $membership->monitor->host_generation;
+            });
+
+        if ($memberships->count() !== 1) {
+            throw new AccessFailure(403, 'access_forbidden', 'Acesso não permitido.');
+        }
+
+        /** @var MonitorMembership $membership */
+        $membership = $memberships->first();
+        $monitor = $membership->monitor;
+
+        if (! $monitor instanceof Monitor) {
+            throw new AccessFailure(403, 'access_forbidden', 'Acesso não permitido.');
+        }
+
+        return [
+            'installationId' => $installationId,
+            'monitorId' => $monitor->id,
+            'membershipId' => $membership->id,
+            'role' => $membership->role->value,
+            'status' => 'Active',
+            'monitorGeneration' => (string) $monitor->host_generation,
+        ];
+    }
+
+    /**
+     * @return array{
      *     firstActivation: bool,
      *     data: array{
      *         monitorId: string,

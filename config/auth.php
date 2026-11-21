@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\Installation;
 use App\Models\User;
 
 return [
@@ -42,6 +43,10 @@ return [
             'driver' => 'session',
             'provider' => 'users',
         ],
+        'sanctum' => [
+            'driver' => 'sanctum',
+            'provider' => 'installations',
+        ],
     ],
 
     /*
@@ -65,6 +70,10 @@ return [
         'users' => [
             'driver' => 'eloquent',
             'model' => env('AUTH_MODEL', User::class),
+        ],
+        'installations' => [
+            'driver' => 'eloquent',
+            'model' => Installation::class,
         ],
 
         // 'users' => [
