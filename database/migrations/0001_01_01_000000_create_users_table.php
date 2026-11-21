@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -13,12 +14,13 @@ return new class extends Migration
     {
         Schema::create('users', function (Blueprint $table) {
             $table->id();
-            $table->string('name');
-            $table->string('email')->unique();
-            $table->timestamp('email_verified_at')->nullable();
-            $table->string('password');
-            $table->rememberToken();
-            $table->timestamps();
+            $table->string('firebase_project_id');
+            $table->string('firebase_uid');
+            $table->unique(
+                ['firebase_project_id', 'firebase_uid'],
+                'users_firebase_identity_unique',
+            );
+            $table->timestampsTz(0);
         });
 
         Schema::create('password_reset_tokens', function (Blueprint $table) {
@@ -42,6 +44,18 @@ return new class extends Migration
      */
     public function down(): void
     {
+        $populatedTables = [];
+
+        foreach (['users', 'password_reset_tokens', 'sessions'] as $table) {
+            if (Schema::hasTable($table) && DB::table($table)->exists()) {
+                $populatedTables[] = $table;
+            }
+        }
+
+        if ($populatedTables !== []) {
+            throw new RuntimeException('Refusing to drop populated user-related tables.');
+        }
+
         Schema::dropIfExists('users');
         Schema::dropIfExists('password_reset_tokens');
         Schema::dropIfExists('sessions');
