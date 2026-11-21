@@ -13,6 +13,8 @@ use App\Models\User;
 use App\Support\ApiV1\JsonTypes;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use Laravel\Sanctum\PersonalAccessToken;
 use LogicException;
 
 class AccessAndPairing
@@ -121,6 +123,340 @@ class AccessAndPairing
             'role' => $membership->role->value,
             'status' => 'Active',
             'monitorGeneration' => (string) $monitor->host_generation,
+        ];
+    }
+
+    /**
+     * @return array{monitorId: string, membershipId: string, generation: string}
+     */
+    public function preflightHostMonitor(AccessContext $context, string $requestedMonitorId): array
+    {
+        $access = $this->discoverCurrentInstallationAccess($context->installationId);
+
+        if ($access['role'] !== AccessRole::Host->value) {
+            throw new AccessFailure(403, 'access_forbidden', 'Acesso não permitido.');
+        }
+
+        if (strtolower($access['monitorId']) !== strtolower($requestedMonitorId)) {
+            throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+        }
+
+        return [
+            'monitorId' => $access['monitorId'],
+            'membershipId' => $access['membershipId'],
+            'generation' => $access['monitorGeneration'],
+        ];
+    }
+
+    public function authorizedHostMonitorId(AccessContext $context): string
+    {
+        $access = $this->discoverCurrentInstallationAccess($context->installationId);
+
+        if ($access['role'] !== AccessRole::Host->value) {
+            throw new AccessFailure(403, 'access_forbidden', 'Acesso não permitido.');
+        }
+
+        return $access['monitorId'];
+    }
+
+    /**
+     * @return array{id: string, invitationSecret: string, createdAt: int, expiresAt: int}
+     */
+    public function issueInvitation(AccessContext $context, string $requestedMonitorId): array
+    {
+        $hostAccess = $this->preflightHostMonitor($context, $requestedMonitorId);
+
+        return DB::transaction(function () use ($context, $hostAccess): array {
+            $monitor = Monitor::query()
+                ->whereKey($hostAccess['monitorId'])
+                ->lockForUpdate()
+                ->first();
+
+            if (! $monitor instanceof Monitor) {
+                throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+            }
+
+            $this->assertCurrentActorToken($context);
+            $this->assertCurrentHostMembership($context, $monitor, $hostAccess['membershipId']);
+
+            $decisionTime = now('UTC')->startOfSecond();
+            $expiresAt = $decisionTime->copy()->addMinutes(15);
+            $secret = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
+            $invitation = $monitor->invitations()->create([
+                'issuing_installation_id' => $context->installationId,
+                'issuing_generation' => $monitor->host_generation,
+                'secret_hash' => hash('sha256', $secret),
+                'expires_at' => $expiresAt,
+                'consumed_at' => null,
+                'revoked_at' => null,
+            ]);
+            $invitation->created_at = $decisionTime;
+            $invitation->updated_at = $decisionTime;
+            $invitation->save();
+
+            return [
+                'id' => $invitation->id,
+                'invitationSecret' => $secret,
+                'createdAt' => $decisionTime->getTimestamp() * 1000,
+                'expiresAt' => $expiresAt->getTimestamp() * 1000,
+            ];
+        }, attempts: 1);
+    }
+
+    /**
+     * @return list<array{id: string, status: 'Available', createdAt: int, expiresAt: int}>
+     */
+    public function listInvitations(AccessContext $context, string $requestedMonitorId): array
+    {
+        $hostAccess = $this->preflightHostMonitor($context, $requestedMonitorId);
+        $invitations = Invitation::query()
+            ->where('monitor_id', $hostAccess['monitorId'])
+            ->where('issuing_generation', (int) $hostAccess['generation'])
+            ->whereNull('consumed_at')
+            ->whereNull('revoked_at')
+            ->where('expires_at', '>', now('UTC'))
+            ->orderBy('created_at')
+            ->orderBy('id')
+            ->limit(50)
+            ->get(['id', 'created_at', 'expires_at']);
+
+        return $invitations
+            ->map(fn (Invitation $invitation): array => [
+                'id' => $invitation->id,
+                'status' => 'Available',
+                'createdAt' => $invitation->created_at->getTimestamp() * 1000,
+                'expiresAt' => $invitation->expires_at->getTimestamp() * 1000,
+            ])
+            ->all();
+    }
+
+    public function cancelInvitation(
+        AccessContext $context,
+        string $requestedMonitorId,
+        string $invitationId,
+    ): void {
+        $hostAccess = $this->preflightHostMonitor($context, $requestedMonitorId);
+
+        if (! Str::isUuid($invitationId)) {
+            throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+        }
+
+        DB::transaction(function () use ($context, $hostAccess, $invitationId): void {
+            $monitor = Monitor::query()
+                ->whereKey($hostAccess['monitorId'])
+                ->lockForUpdate()
+                ->first();
+
+            if (! $monitor instanceof Monitor) {
+                throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+            }
+
+            $this->assertCurrentActorToken($context);
+            $this->assertCurrentHostMembership($context, $monitor, $hostAccess['membershipId']);
+
+            $invitation = Invitation::query()
+                ->whereKey($invitationId)
+                ->where('monitor_id', $monitor->id)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $invitation instanceof Invitation) {
+                throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+            }
+
+            if ($invitation->consumed_at !== null) {
+                throw new AccessFailure(409, 'invitation_already_consumed', 'O convite já foi utilizado.');
+            }
+
+            $decisionTime = now('UTC')->startOfSecond();
+
+            if ($invitation->revoked_at === null && $invitation->expires_at->isAfter($decisionTime)) {
+                $invitation->revoked_at = $decisionTime;
+                $invitation->updated_at = $decisionTime;
+                $invitation->save();
+            }
+        }, attempts: 1);
+    }
+
+    /**
+     * @return array{
+     *     requestId: string,
+     *     installationId: string,
+     *     status: 'Pending',
+     *     requestExpiresAt: int,
+     *     accessToken: string
+     * }
+     */
+    public function redeemInvitation(string $invitationSecret, ?string $installationLabel): array
+    {
+        return DB::transaction(function () use ($invitationSecret, $installationLabel): array {
+            $secretHash = hash('sha256', $invitationSecret);
+            $monitorId = Invitation::query()
+                ->where('secret_hash', $secretHash)
+                ->value('monitor_id');
+
+            if (! is_string($monitorId)) {
+                throw new AccessFailure(410, 'invitation_unavailable', 'Convite indisponível.');
+            }
+
+            $monitor = Monitor::query()
+                ->whereKey($monitorId)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $monitor instanceof Monitor) {
+                throw new AccessFailure(410, 'invitation_unavailable', 'Convite indisponível.');
+            }
+
+            $invitation = Invitation::query()
+                ->where('secret_hash', $secretHash)
+                ->lockForUpdate()
+                ->first();
+
+            $redemptionTime = now('UTC');
+
+            if (
+                ! $invitation instanceof Invitation
+                || $invitation->monitor_id !== $monitor->id
+                || $invitation->consumed_at !== null
+                || $invitation->revoked_at !== null
+                || ! $invitation->expires_at->isAfter($redemptionTime)
+                || $invitation->issuing_generation !== $monitor->host_generation
+            ) {
+                throw new AccessFailure(410, 'invitation_unavailable', 'Convite indisponível.');
+            }
+
+            $currentIssuerMembershipExists = MonitorMembership::query()
+                ->where('monitor_id', $monitor->id)
+                ->where('installation_id', $invitation->issuing_installation_id)
+                ->where('role', AccessRole::Host->value)
+                ->where('generation', $monitor->host_generation)
+                ->whereNotNull('approved_at')
+                ->whereNull('revoked_at')
+                ->exists();
+
+            if (! $currentIssuerMembershipExists) {
+                throw new AccessFailure(410, 'invitation_unavailable', 'Convite indisponível.');
+            }
+
+            $decisionTime = $redemptionTime->copy()->startOfSecond();
+            $requestExpiresAt = $decisionTime->copy()->addSeconds(900);
+
+            $invitation->consumed_at = $decisionTime;
+            $invitation->updated_at = $decisionTime;
+            $invitation->save();
+
+            $installation = Installation::query()->create([
+                'label' => $installationLabel,
+            ]);
+            $installation->created_at = $decisionTime;
+            $installation->updated_at = $decisionTime;
+            $installation->save();
+
+            $pairingRequest = PairingRequest::query()->create([
+                'monitor_id' => $monitor->id,
+                'invitation_id' => $invitation->id,
+                'installation_id' => $installation->id,
+                'status' => PairingRequestStatus::Pending,
+                'request_expires_at' => $requestExpiresAt,
+                'decided_at' => null,
+                'decision_actor_membership_id' => null,
+            ]);
+            $pairingRequest->created_at = $decisionTime;
+            $pairingRequest->updated_at = $decisionTime;
+            $pairingRequest->save();
+
+            $accessToken = $installation->createToken(
+                'pairing-pending',
+                ['pairing:pending'],
+                $requestExpiresAt,
+            );
+
+            return [
+                'requestId' => $pairingRequest->id,
+                'installationId' => $installation->id,
+                'status' => PairingRequestStatus::Pending->value,
+                'requestExpiresAt' => $requestExpiresAt->getTimestamp() * 1000,
+                'accessToken' => $accessToken->plainTextToken,
+            ];
+        }, attempts: 1);
+    }
+
+    /**
+     * @return array{
+     *     id: string,
+     *     status: 'Pending'|'Approved'|'Rejected'|'Expired'|'Cancelled',
+     *     requestExpiresAt: int,
+     *     decidedAt: ?int,
+     *     monitor: null|array{id: string, membershipId: string, role: 'Support'}
+     * }
+     */
+    public function pollCurrentPairingRequest(AccessContext $context): array
+    {
+        $pairingRequest = PairingRequest::query()
+            ->where('installation_id', $context->installationId)
+            ->first();
+
+        if (! $pairingRequest instanceof PairingRequest) {
+            throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+        }
+
+        if (
+            $pairingRequest->status === PairingRequestStatus::Pending
+            && ! $pairingRequest->request_expires_at->isAfter(now('UTC'))
+        ) {
+            throw new AccessFailure(
+                410,
+                'pairing_request_unavailable',
+                'A solicitação de pareamento não está mais disponível.',
+            );
+        }
+
+        $approvedSupport = null;
+        $monitor = null;
+
+        if ($pairingRequest->status === PairingRequestStatus::Approved) {
+            $approvedSupport = MonitorMembership::query()
+                ->where('monitor_id', $pairingRequest->monitor_id)
+                ->where('installation_id', $context->installationId)
+                ->where('role', AccessRole::Support->value)
+                ->whereNotNull('approved_at')
+                ->whereNull('revoked_at')
+                ->first();
+
+            if (! $approvedSupport instanceof MonitorMembership) {
+                throw new AccessFailure(
+                    410,
+                    'pairing_request_unavailable',
+                    'A solicitação de pareamento não está mais disponível.',
+                );
+            }
+
+            $monitor = Monitor::query()->find($pairingRequest->monitor_id);
+
+            if (! $monitor instanceof Monitor) {
+                throw new AccessFailure(
+                    410,
+                    'pairing_request_unavailable',
+                    'A solicitação de pareamento não está mais disponível.',
+                );
+            }
+        }
+
+        return [
+            'id' => $pairingRequest->id,
+            'status' => $pairingRequest->status->value,
+            'requestExpiresAt' => $pairingRequest->request_expires_at->getTimestamp() * 1000,
+            'decidedAt' => $pairingRequest->decided_at === null
+                ? null
+                : $pairingRequest->decided_at->getTimestamp() * 1000,
+            'monitor' => $approvedSupport instanceof MonitorMembership && $monitor instanceof Monitor
+                ? [
+                    'id' => $monitor->id,
+                    'membershipId' => $approvedSupport->id,
+                    'role' => AccessRole::Support->value,
+                ]
+                : null,
         ];
     }
 
@@ -298,6 +634,52 @@ class AccessAndPairing
                 'recent_authentication_required',
                 'É necessária uma autenticação recente para ativar o dispositivo.',
             );
+        }
+    }
+
+    private function assertCurrentActorToken(AccessContext $context): void
+    {
+        $accessToken = PersonalAccessToken::query()
+            ->whereKey($context->accessTokenId)
+            ->lockForUpdate()
+            ->first();
+        $expirationMinutes = config('sanctum.expiration');
+
+        if (
+            ! $accessToken instanceof PersonalAccessToken
+            || $accessToken->tokenable_type !== (new Installation)->getMorphClass()
+            || ! hash_equals($context->installationId, (string) $accessToken->tokenable_id)
+            || ($accessToken->expires_at !== null && ! $accessToken->expires_at->isAfter(now('UTC')))
+            || (
+                $expirationMinutes !== null
+                && (
+                    $accessToken->created_at === null
+                    || ! $accessToken->created_at->isAfter(now('UTC')->subMinutes((int) $expirationMinutes))
+                )
+            )
+        ) {
+            throw new AccessFailure(401, 'access_unauthenticated', 'A credencial não é válida.');
+        }
+    }
+
+    private function assertCurrentHostMembership(
+        AccessContext $context,
+        Monitor $monitor,
+        string $membershipId,
+    ): void {
+        $membershipExists = MonitorMembership::query()
+            ->whereKey($membershipId)
+            ->where('monitor_id', $monitor->id)
+            ->where('installation_id', $context->installationId)
+            ->where('role', AccessRole::Host->value)
+            ->where('generation', $monitor->host_generation)
+            ->whereNotNull('approved_at')
+            ->whereNull('revoked_at')
+            ->lockForUpdate()
+            ->exists();
+
+        if (! $membershipExists) {
+            throw new AccessFailure(403, 'access_forbidden', 'Acesso não permitido.');
         }
     }
 
