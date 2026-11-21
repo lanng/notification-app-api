@@ -1,5 +1,6 @@
 <?php
 
+use App\Support\ApiV1\RenderApiV1Exception;
 use App\Support\ApiV1\RequireJsonObject;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -21,5 +22,8 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
+        );
+        $exceptions->render(
+            fn (Throwable $exception, Request $request) => RenderApiV1Exception::render($exception, $request),
         );
     })->create();
