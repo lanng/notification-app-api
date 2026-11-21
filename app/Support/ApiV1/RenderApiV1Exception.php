@@ -2,6 +2,7 @@
 
 namespace App\Support\ApiV1;
 
+use App\Support\AccessAndPairing\AccessFailure;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Http\JsonResponse;
@@ -16,6 +17,16 @@ class RenderApiV1Exception
     {
         if (! $request->is('api/v1', 'api/v1/*')) {
             return null;
+        }
+
+        if ($exception instanceof AccessFailure) {
+            $exception = new ApiProblem(
+                $exception->status,
+                $exception->errorCode,
+                $exception->safeMessage,
+                $exception->errors,
+                $exception->headers,
+            );
         }
 
         if ($exception instanceof ApiProblem) {
