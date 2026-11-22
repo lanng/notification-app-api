@@ -7,14 +7,18 @@ use App\Support\AccessAndPairing\AccessAndPairing;
 use App\Support\AccessAndPairing\AccessContext;
 use App\Support\AccessAndPairing\AccessFailure;
 use App\Support\AccessAndPairing\DisabledOwnerIdentityVerifier;
+use App\Support\AccessAndPairing\FirebaseOwnerIdentityVerifier;
+use App\Support\AccessAndPairing\FirebaseVerificationClient;
 use App\Support\AccessAndPairing\OwnerIdentityVerifier;
 use App\Support\AccessAndPairing\VerifiedOwnerIdentity;
 use App\Support\ApiV1\ApiProblem;
 use App\Support\ApiV1\JsonTypes;
 use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
+use Kreait\Firebase\Util;
 use Laravel\Sanctum\PersonalAccessToken;
 use Laravel\Sanctum\Sanctum;
 use LogicException;
@@ -26,7 +30,51 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        $this->app->bind(OwnerIdentityVerifier::class, DisabledOwnerIdentityVerifier::class);
+        $this->app->singleton(FirebaseVerificationClient::class, function (): FirebaseVerificationClient {
+            $firebaseProjectId = config('access_pairing.owner.firebase_project_id');
+            $credentialsPath = config('access_pairing.firebase.credentials_path');
+
+            if (
+                ! is_string($firebaseProjectId)
+                || $firebaseProjectId === ''
+                || ! is_string($credentialsPath)
+                || $credentialsPath === ''
+            ) {
+                throw new LogicException('Firebase verification configuration is incomplete.');
+            }
+
+            return new FirebaseVerificationClient($firebaseProjectId, $credentialsPath);
+        });
+
+        $this->app->bind(OwnerIdentityVerifier::class, function (Application $app): OwnerIdentityVerifier {
+            if (config('access_pairing.firebase.enabled') !== true) {
+                return new DisabledOwnerIdentityVerifier;
+            }
+
+            $firebaseProjectId = config('access_pairing.owner.firebase_project_id');
+            $firebaseUid = config('access_pairing.owner.firebase_uid');
+            $credentialsPath = config('access_pairing.firebase.credentials_path');
+            $verificationClient = null;
+
+            if (
+                is_string($firebaseProjectId)
+                && $firebaseProjectId !== ''
+                && is_string($firebaseUid)
+                && $firebaseUid !== ''
+                && is_string($credentialsPath)
+                && $credentialsPath !== ''
+                && Util::authEmulatorHost() === null
+            ) {
+                $verificationClient = $app->make(FirebaseVerificationClient::class);
+            }
+
+            return new FirebaseOwnerIdentityVerifier(
+                $firebaseProjectId,
+                $firebaseUid,
+                $credentialsPath,
+                $verificationClient,
+            );
+        });
     }
 
     /**
