@@ -132,6 +132,7 @@ class AccessAndPairing
      */
     public function preflightHostMonitor(AccessContext $context, string $requestedMonitorId): array
     {
+        $this->assertCurrentActorToken($context, lockForUpdate: false);
         $access = $this->discoverCurrentInstallationAccess($context->installationId);
 
         if ($access['role'] !== AccessRole::Host->value) {
@@ -151,6 +152,7 @@ class AccessAndPairing
 
     public function authorizedHostMonitorId(AccessContext $context): string
     {
+        $this->assertCurrentActorToken($context, lockForUpdate: false);
         $access = $this->discoverCurrentInstallationAccess($context->installationId);
 
         if ($access['role'] !== AccessRole::Host->value) {
@@ -1075,12 +1077,15 @@ class AccessAndPairing
         }
     }
 
-    private function assertCurrentActorToken(AccessContext $context): void
+    private function assertCurrentActorToken(AccessContext $context, bool $lockForUpdate = true): void
     {
-        $accessToken = PersonalAccessToken::query()
-            ->whereKey($context->accessTokenId)
-            ->lockForUpdate()
-            ->first();
+        $tokenQuery = PersonalAccessToken::query()->whereKey($context->accessTokenId);
+
+        if ($lockForUpdate) {
+            $tokenQuery->lockForUpdate();
+        }
+
+        $accessToken = $tokenQuery->first();
         $expirationMinutes = config('sanctum.expiration');
 
         if (
