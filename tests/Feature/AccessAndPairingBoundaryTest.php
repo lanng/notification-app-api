@@ -129,6 +129,8 @@ class AccessAndPairingBoundaryTest extends TestCase
 
         $expected = [
             'GET api/v1/installation',
+            'PUT api/v1/installation/push-token',
+            'DELETE api/v1/installation/push-token',
             'POST api/v1/monitors/{monitor}/invitations',
             'GET api/v1/monitors/{monitor}/invitations',
             'DELETE api/v1/monitors/{monitor}/invitations/{invitation}',
@@ -137,6 +139,9 @@ class AccessAndPairingBoundaryTest extends TestCase
             'POST api/v1/monitors/{monitor}/pairing-requests/{pairingRequest}/rejection',
             'GET api/v1/monitors/{monitor}/supports',
             'DELETE api/v1/monitors/{monitor}/supports/{membership}',
+            'PUT api/v1/monitors/{monitor}/snapshot',
+            'GET api/v1/monitors/{monitor}/snapshot',
+            'GET api/v1/monitors/{monitor}/history',
             'POST api/v1/owner/host-activations',
             'GET api/v1/owner/monitor',
             'POST api/v1/pairing-requests',

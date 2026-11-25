@@ -13,6 +13,9 @@ use App\Support\AccessAndPairing\OwnerIdentityVerifier;
 use App\Support\AccessAndPairing\VerifiedOwnerIdentity;
 use App\Support\ApiV1\ApiProblem;
 use App\Support\ApiV1\JsonTypes;
+use App\Support\SharedMonitor\FirebaseMessagingPushDispatcher;
+use App\Support\SharedMonitor\NullSharedAlertPushDispatcher;
+use App\Support\SharedMonitor\SharedAlertPushDispatcher;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Http\Request;
@@ -74,6 +77,29 @@ class AppServiceProvider extends ServiceProvider
                 $credentialsPath,
                 $verificationClient,
             );
+        });
+
+        $this->app->bind(SharedAlertPushDispatcher::class, function (): SharedAlertPushDispatcher {
+            if (
+                $this->app->environment('testing')
+                || config('access_pairing.firebase.enabled') !== true
+            ) {
+                return new NullSharedAlertPushDispatcher;
+            }
+
+            $firebaseProjectId = config('access_pairing.owner.firebase_project_id');
+            $credentialsPath = config('access_pairing.firebase.credentials_path');
+
+            if (
+                ! is_string($firebaseProjectId)
+                || $firebaseProjectId === ''
+                || ! is_string($credentialsPath)
+                || $credentialsPath === ''
+            ) {
+                return new NullSharedAlertPushDispatcher;
+            }
+
+            return new FirebaseMessagingPushDispatcher($firebaseProjectId, $credentialsPath);
         });
     }
 

@@ -2,8 +2,11 @@
 
 use App\Http\Controllers\Api\V1\HostActivationController;
 use App\Http\Controllers\Api\V1\InstallationController;
+use App\Http\Controllers\Api\V1\InstallationPushTokenController;
 use App\Http\Controllers\Api\V1\InvitationController;
+use App\Http\Controllers\Api\V1\MonitorHistoryController;
 use App\Http\Controllers\Api\V1\MonitorPairingRequestController;
+use App\Http\Controllers\Api\V1\MonitorSnapshotController;
 use App\Http\Controllers\Api\V1\OwnerMonitorController;
 use App\Http\Controllers\Api\V1\PairingRequestController;
 use App\Http\Controllers\Api\V1\SupportMembershipController;
@@ -92,3 +95,23 @@ Route::get('/v1/pairing-requests/current', [PairingRequestController::class, 'sh
         ApplyAccessRateLimit::class.':ap5.pairing.poll',
     ])
     ->name('api.v1.pairing-requests.current');
+
+Route::put('/v1/monitors/{monitor}/snapshot', [MonitorSnapshotController::class, 'upsert'])
+    ->middleware(['auth:sanctum', RequireInstallation::class, 'v1.json'])
+    ->name('api.v1.monitors.snapshot.upsert');
+
+Route::get('/v1/monitors/{monitor}/snapshot', [MonitorSnapshotController::class, 'show'])
+    ->middleware(['auth:sanctum', RequireInstallation::class])
+    ->name('api.v1.monitors.snapshot.show');
+
+Route::get('/v1/monitors/{monitor}/history', [MonitorHistoryController::class, 'index'])
+    ->middleware(['auth:sanctum', RequireInstallation::class])
+    ->name('api.v1.monitors.history.index');
+
+Route::put('/v1/installation/push-token', [InstallationPushTokenController::class, 'upsert'])
+    ->middleware(['auth:sanctum', RequireInstallation::class, 'v1.json'])
+    ->name('api.v1.installation.push-token.upsert');
+
+Route::delete('/v1/installation/push-token', [InstallationPushTokenController::class, 'destroy'])
+    ->middleware(['auth:sanctum', RequireInstallation::class])
+    ->name('api.v1.installation.push-token.destroy');

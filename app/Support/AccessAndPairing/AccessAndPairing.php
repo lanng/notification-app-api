@@ -5,6 +5,7 @@ namespace App\Support\AccessAndPairing;
 use App\Enums\AccessRole;
 use App\Enums\PairingRequestStatus;
 use App\Models\Installation;
+use App\Models\InstallationPushToken;
 use App\Models\Invitation;
 use App\Models\Monitor;
 use App\Models\MonitorMembership;
@@ -160,6 +161,69 @@ class AccessAndPairing
         }
 
         return $access['monitorId'];
+    }
+
+    /**
+     * @return array{
+     *     installationId: string,
+     *     monitorId: string,
+     *     membershipId: string,
+     *     role: 'Host'|'Support',
+     *     generation: string
+     * }
+     */
+    public function preflightMonitorParticipant(AccessContext $context, string $requestedMonitorId): array
+    {
+        $this->assertCurrentActorToken($context, lockForUpdate: false);
+        $access = $this->discoverCurrentInstallationAccess($context->installationId);
+
+        if (strtolower($access['monitorId']) !== strtolower($requestedMonitorId)) {
+            throw new AccessFailure(404, 'resource_not_found', 'Recurso não encontrado.');
+        }
+
+        return [
+            'installationId' => $access['installationId'],
+            'monitorId' => $access['monitorId'],
+            'membershipId' => $access['membershipId'],
+            'role' => $access['role'],
+            'generation' => $access['monitorGeneration'],
+        ];
+    }
+
+    /**
+     * @return array{
+     *     installationId: string,
+     *     monitorId: string,
+     *     membershipId: string,
+     *     role: 'Host'|'Support',
+     *     generation: string
+     * }
+     */
+    public function assertActiveInstallation(AccessContext $context): array
+    {
+        $this->assertCurrentActorToken($context, lockForUpdate: false);
+        $access = $this->discoverCurrentInstallationAccess($context->installationId);
+
+        return [
+            'installationId' => $access['installationId'],
+            'monitorId' => $access['monitorId'],
+            'membershipId' => $access['membershipId'],
+            'role' => $access['role'],
+            'generation' => $access['monitorGeneration'],
+        ];
+    }
+
+    public function assertCurrentActorTokenInTransaction(AccessContext $context): void
+    {
+        $this->assertCurrentActorToken($context, lockForUpdate: true);
+    }
+
+    public function assertCurrentHostMembershipInTransaction(
+        AccessContext $context,
+        Monitor $monitor,
+        string $membershipId,
+    ): void {
+        $this->assertCurrentHostMembership($context, $monitor, $membershipId);
     }
 
     /**
@@ -667,6 +731,10 @@ class AccessAndPairing
                 ->where('tokenable_id', $membership->installation_id);
             $tokenQuery->lockForUpdate()->get();
             $tokenQuery->delete();
+
+            InstallationPushToken::query()
+                ->where('installation_id', $membership->installation_id)
+                ->delete();
         }, attempts: 1);
     }
 
@@ -1142,6 +1210,9 @@ class AccessAndPairing
         $currentHost->revoked_at = $decisionTime;
         $currentHost->save();
         $currentHost->installation?->tokens()->delete();
+        InstallationPushToken::query()
+            ->where('installation_id', $currentHost->installation_id)
+            ->delete();
     }
 
     private function retirePreviousGeneration(

@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Monitor extends Model
 {
@@ -58,6 +59,26 @@ class Monitor extends Model
     public function pairingRequests(): HasMany
     {
         return $this->hasMany(PairingRequest::class);
+    }
+
+    /**
+     * Get the latest shared monitor snapshot.
+     *
+     * @return HasOne<MonitorSnapshot, $this>
+     */
+    public function snapshot(): HasOne
+    {
+        return $this->hasOne(MonitorSnapshot::class);
+    }
+
+    /**
+     * Get sanitized shared history entries for this monitor.
+     *
+     * @return HasMany<MonitorHistoryEntry, $this>
+     */
+    public function historyEntries(): HasMany
+    {
+        return $this->hasMany(MonitorHistoryEntry::class);
     }
 
     /**
