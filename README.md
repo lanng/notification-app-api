@@ -1,116 +1,101 @@
-# Tag Alert
+# Tag Alert API (Backend)
 
-Bootstrap enxuto de uma API Laravel 13 em PHP 8.3, executada localmente com
-Laravel Sail e PostgreSQL privado na rede Docker do projeto.
+API REST desenvolvida em **Laravel 13 + PHP 8.3 + PostgreSQL** para dar suporte ao aplicativo Android **Tag Alert**, responsável por autenticação do proprietário, pareamento seguro entre aparelho principal (**Host**) e aparelhos de apoio (**Convidado/Suporte**), sincronização sanitizada de saldo/histórico e disparo de alertas remotos em tempo real via **Firebase Cloud Messaging (FCM)**.
 
-## Escopo atual
+> **Aviso:** projeto pessoal e independente, sem vínculo oficial com o C6 Bank. A API nunca recebe nem armazena senhas bancárias, dados de conta ou textos brutos de notificações do banco.
 
-Este repositório ainda não implementa funcionalidades de negócio. Não há
-frontend, dependências Node do projeto, Redis, Horizon, login, pareamento,
-autenticação, FCM, alertas, agendador, outbox ou implantação de produção.
-Embora a imagem oficial do Sail possa incluir ferramentas Node, elas não são
-dependências ou etapas de build da aplicação.
+---
 
-O endpoint `GET http://localhost:8088/api/health` responde
-`200 {"status":"ok"}`. É somente uma verificação de liveness; não testa a
-conexão com o banco e não é uma readiness check. O endpoint padrão `/up` do
-Laravel também continua disponível como liveness. A raiz `/` retorna 404 (não
-há página frontend), e rotas de API desconhecidas retornam 404 JSON.
+## Principais responsabilidades
 
-Nenhuma migration foi executada neste bootstrap. Os arquivos padrão de usuário
-e migrations do Laravel continuam pendentes e não representam uma
-implementação de autenticação.
+- **Autenticação do proprietário (Host):** validação estrita de ID tokens do **Firebase Auth (Google)** com verificação de `project_id`, `uid` configurado manualmente no servidor e autenticação recente para ativação ou troca de aparelho Host (com incremento de geração e revogação automática do Host anterior).
+- **Pareamento seguro Host ↔ Suporte (Convidado):**
+  - Emissão de convites temporários (15 min) com segredo armazenado apenas em hash SHA-256.
+  - Resgate por convite com criação de solicitação pendente e aprovação/rejeição explícita pelo Host.
+  - Controle de limite de suportes ativos por monitor, listagem e revogação imediata de credenciais Sanctum e tokens FCM.
+- **Sincronização sanitizada de saldo e histórico:**
+  - O Host publica apenas dados numéricos e metadados sanitizados (saldo estimado em centavos, limite configurado, intervalo de repetição, estado do ciclo de alerta e movimentações do tipo `Reference`, `TagDebit` e `PixCredit`).
+  - Convidados autorizados consultam saldo e histórico paginado/filtrável em modo **somente leitura**.
+- **Motor de escalonamento de alertas e push FCM:**
+  - **Normal** (`saldo >= limite`): encerra alertas ativos e envia evento `alert_cleared`.
+  - **Atenção** (`metade <= saldo < limite`): mantém o 1º aviso apenas no Host; a partir do 2º aviso (ou decorrido o intervalo configurado, independentemente de pausa local do Host) ativa o alerta para Convidados e envia push FCM.
+  - **Crítico** (`saldo < metade do limite`): ativa imediatamente para Convidados e dispara push FCM de alta prioridade (`alert_escalated`) para acionamento do alarme crítico.
+  - Limpeza automática de tokens FCM inválidos/expirados retornados pelo Google e degradação segura em caso de indisponibilidade do serviço de push.
 
-## Requisitos locais
+---
 
-- PHP 8.3 e Composer no host para instalar dependências com `composer install`.
-  O host não precisa de `pdo_pgsql`; os comandos da aplicação rodam no Sail.
-- Docker disponível no contexto `default`.
+## Endpoints principais (`/api/v1`)
 
-O alvo de runtime planejado para um VPS é PHP 8.3; até aqui, essa versão foi
-verificada no Sail, não em um VPS. Os comandos abaixo selecionam o contexto
-`default` e o projeto `tag-alert` por execução, sem configurar alias ou alterar
-o contexto global do Docker.
+### Saúde
+- `GET /api/health` — verificação simples de liveness (`{"status":"ok"}`)
 
-O Compose contém somente a aplicação (`laravel.test`) e o PostgreSQL (`pgsql`).
-O HTTP é publicado apenas em `127.0.0.1:8088`; o PostgreSQL fica privado na rede
-Docker, acessível pela aplicação em `pgsql:5432`, sem porta publicada no host.
-A imagem da aplicação é `tag-alert-sail-8.3/app`; o PostgreSQL usa a tag
-flutuante `postgres:18-alpine`, que pode avançar dentro da major 18. A versão
-18.7 foi observada na verificação local, não está fixada. A major do PostgreSQL
-que será usada em um VPS ainda não foi definida nem comparada.
+### Proprietário e instalação
+- `GET /api/v1/owner/monitor` — consulta o monitor configurado para a identidade Google/Firebase verificada
+- `POST /api/v1/owner/host-activations` — ativa ou substitui o aparelho Host (controle otimista por geração)
+- `GET /api/v1/installation` — valida a credencial Sanctum atual e retorna o papel ativo (`Host` ou `Support`)
 
-## Primeiro uso e inicialização
+### Pareamento e gestão de suportes
+- `POST /api/v1/monitors/{monitor}/invitations` — gera convite temporário (Host)
+- `GET /api/v1/monitors/{monitor}/invitations` — lista convites disponíveis (Host)
+- `DELETE /api/v1/monitors/{monitor}/invitations/{invitation}` — cancela convite (Host)
+- `POST /api/v1/pairing-requests` — resgata convite e cria solicitação pendente (público com rate limiting)
+- `GET /api/v1/pairing-requests/current` — consulta o status da solicitação pendente
+- `GET /api/v1/monitors/{monitor}/pairing-requests` — lista pedidos pendentes (Host)
+- `POST /api/v1/monitors/{monitor}/pairing-requests/{pairingRequest}/approval` — aprova suporte (Host)
+- `POST /api/v1/monitors/{monitor}/pairing-requests/{pairingRequest}/rejection` — rejeita pedido (Host)
+- `GET /api/v1/monitors/{monitor}/supports` — lista suportes ativos (Host)
+- `DELETE /api/v1/monitors/{monitor}/supports/{membership}` — revoga suporte e limpa token FCM (Host)
 
-Execute na raiz do repositório:
+### Sincronização compartilhada e push
+- `PUT /api/v1/monitors/{monitor}/snapshot` — publica snapshot sanitizado e entradas recentes do histórico (Host)
+- `GET /api/v1/monitors/{monitor}/snapshot` — consulta o último snapshot e severidade calculada (Host ou Suporte)
+- `GET /api/v1/monitors/{monitor}/history` — lista histórico sanitizado com paginação por cursor e filtro (`all`, `entries`, `exits`, `adjustments`)
+- `PUT /api/v1/installation/push-token` — registra/atualiza o token FCM da instalação ativa
+- `DELETE /api/v1/installation/push-token` — remove o token FCM da instalação ativa
 
-```sh
+---
+
+## Stack e segurança
+
+- **Runtime e framework:** PHP 8.3, Laravel 13, Laravel Sanctum 4, PostgreSQL 18 (Docker / Laravel Sail)
+- **Integrações Firebase:** `kreait/firebase-php` 8 (verificação de ID tokens Google/Firebase + envio multicast FCM V1 `data-only` de alta prioridade)
+- **Validação e contratos estritos:** middleware `v1.json` com parser JSON estrito, códigos de erro padronizados, rate limiting por IP/identidade/segredo, transações PostgreSQL com `SELECT ... FOR UPDATE` para serialização de mutações e guarda de rollback contra remoção acidental de dados
+- **Qualidade e testes:** **479 testes PHPUnit** (3.200+ asserções) executados contra um banco PostgreSQL real isolado (`testing`) protegido por guarda explícita para nunca atingir o banco de desenvolvimento, além de formatação padronizada com **Laravel Pint**
+
+---
+
+## Como executar localmente
+
+### Requisitos
+- PHP 8.3 e Composer
+- Docker (Laravel Sail)
+
+### Inicialização
+```bash
 composer install
-test -f .env || cp .env.example .env
-DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail up -d --build
-if ! grep -q '^APP_KEY=' .env; then
-    printf '\nAPP_KEY=\n' >> .env
-fi
-if grep -Eq "^APP_KEY=(\"\"|'')?$" .env; then
-    sed -i -E "s/^APP_KEY=(\"\"|'')?$/APP_KEY=/" .env
-    DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail artisan key:generate --no-interaction
-fi
+cp .env.example .env
+./vendor/bin/sail up -d --build
+./vendor/bin/sail artisan key:generate --no-interaction
+./vendor/bin/sail artisan migrate --no-interaction
 ```
 
-O `.env` existente é preservado, exceto pela inclusão ou normalização de uma
-`APP_KEY` vazia antes de gerar a chave. O comando Artisan só roda quando a chave
-está ausente ou vazia (`APP_KEY=`, `APP_KEY=""` ou `APP_KEY=''`); valores
-existentes são mantidos. Não compartilhe nem registre valores privados desse
-arquivo. A inicialização não executa migrations nem instala dependências
-frontend. Não rode `sail:install` novamente: o `compose.yaml` já é versionado e
-essa instalação pode recriar a configuração e a imagem padrão compartilhada do Sail.
+### Configuração do Firebase (opcional para uso com autenticação real e FCM)
+Defina no `.env` local (nunca versionado):
+- `ACCESS_PAIRING_FIREBASE_ENABLED=true`
+- `ACCESS_PAIRING_OWNER_FIREBASE_PROJECT_ID=<id-do-projeto-firebase>`
+- `ACCESS_PAIRING_OWNER_FIREBASE_UID=<uid-do-proprietario>`
+- `ACCESS_PAIRING_FIREBASE_CREDENTIALS=<caminho-para-service-account.json>`
 
-As variáveis `APP_PORT` e `APP_URL` são independentes: altere ambas no `.env`
-para manter a porta HTTP e a URL consistentes (não há sincronização automática).
-Por exemplo, para usar a porta 8089, defina `APP_PORT=8089` e
-`APP_URL=http://localhost:8089` e recrie somente os serviços deste projeto:
+> Para envio de pushes em tempo real via FCM, a conta de serviço configurada precisa do papel **Firebase Cloud Messaging API Admin** (`cloudmessaging.messages.create`) no Google Cloud IAM.
 
-```sh
-DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail up -d --force-recreate
+### Rodar testes e formatação
+```bash
+./vendor/bin/sail artisan test --compact
+./vendor/bin/sail php vendor/bin/pint --dirty
 ```
 
-## Testes e verificações
+---
 
-O PHPUnit usa um banco PostgreSQL real chamado `testing`, separado do banco de
-desenvolvimento `tag_alert`. Os testes confirmam essa conexão. Execute:
+## Repositório complementar
 
-```sh
-DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail artisan test --compact
-DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail composer validate --strict
-DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail composer audit
-vendor/bin/pint --dirty --format agent
-```
-
-Para salvar o relatório JUnit dos testes:
-
-```sh
-DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail artisan test --compact --log-junit storage/logs/task3-results.xml
-```
-
-O `composer audit` deve ser avaliado pelo resultado atual do Composer; não
-ignore avisos para fazer a verificação parecer aprovada.
-
-## Laravel Boost para OpenCode
-
-Laravel Boost é uma dependência de desenvolvimento. A configuração V2 do
-OpenCode em `opencode.json` inicia, a partir da raiz do repositório,
-`bash vendor/bin/sail artisan boost:mcp --no-interaction` dentro do ambiente
-Sail, onde o driver PostgreSQL está disponível. O Docker local precisa estar
-ativo para usar essa integração. A conectividade do arquivo `.mcp.json` com
-Claude Code não foi verificada.
-
-## Parar os serviços
-
-Para parar somente os serviços deste projeto, preservando o volume local do
-PostgreSQL:
-
-```sh
-DOCKER_CONTEXT=default COMPOSE_PROJECT_NAME=tag-alert ./vendor/bin/sail stop
-```
-
-Não use `down -v` para a parada rotineira: isso remove o volume do banco.
+- **Aplicativo Android (Kotlin + Jetpack Compose):** `notofication-app`
